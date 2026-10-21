@@ -77,8 +77,16 @@ Create a `.env` file with your Bill.com AP/AR API credentials:
 # Required: Developer Key from Settings → Sync & Integrations → Manage Developer Keys
 BILL_DEV_KEY=your_developer_key_here
 
-# Optional: Environment (default: production)
+# Environment: "sandbox" or "production"
+# (default: production for stdio; required for http transport)
 BILL_ENVIRONMENT=production
+
+# Optional: expose only read-only tools (list_* and get_*)
+# (default: true for http transport, false for stdio)
+BILL_READ_ONLY=true
+
+# Optional: comma-separated list of tool names to expose
+# BILL_ALLOWED_TOOLS=list_bills,get_bill,list_vendors
 
 # Optional: Auth type (default: sync_token)
 # - sync_token: Limited access, 48-hour sessions (for syncing/reporting)
@@ -165,19 +173,72 @@ npm start
 
 ### Docker
 
+The image runs the HTTP transport (see [Remote Deployment](#remote-deployment-http)).
+
 ```bash
 # Build the Docker image
 docker build -t bill-mcp-server .
 
 # Run the container
-docker run \
+docker run -p 3000:3000 \
+  -e PORT=3000 \
+  -e MCP_AUTH_TOKEN=your_random_token_of_at_least_32_chars \
   -e BILL_DEV_KEY=your_dev_key \
   -e BILL_USERNAME=your_sync_token_name \
   -e BILL_PASSWORD=your_sync_token_value \
   -e BILL_ORGANIZATION_ID=008xxxxxxxxxxxxx \
-  -e BILL_ENVIRONMENT=production \
+  -e BILL_ENVIRONMENT=sandbox \
   bill-mcp-server
 ```
+
+## Remote Deployment (HTTP)
+
+By default the server speaks MCP over stdio, for clients that launch it locally. Set
+`MCP_TRANSPORT=http` (or just `PORT`, which hosting platforms set for you) to serve the
+[Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+transport instead:
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `POST /mcp` | `Authorization: Bearer $MCP_AUTH_TOKEN` | MCP requests (stateless) |
+| `GET /health` | None | Health check, returns `{"status":"ok"}` |
+
+In HTTP mode:
+
+- `MCP_AUTH_TOKEN` is required and must be at least 32 characters. Generate one with
+  `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+- `BILL_ENVIRONMENT` must be set explicitly, so a deployment never defaults to production.
+- `BILL_READ_ONLY` defaults to `true`. Set it to `false` only if the AI should be able to
+  create or change data in Bill.com, and combine it with `BILL_ALLOWED_TOOLS` to expose only
+  the write tools you need.
+
+### Railway
+
+1. Create a service from this GitHub repository and pick the branch to deploy. Railway
+   redeploys on every push to that branch.
+2. In the service **Settings**:
+   - **Root Directory**: `/ap-ar`
+   - **Config-as-code / Railway Config File**: `/ap-ar/railway.json` (the config file path
+     does not follow the root directory)
+3. In **Variables**, set `MCP_AUTH_TOKEN`, `BILL_ENVIRONMENT`, `BILL_DEV_KEY`,
+   `BILL_ORGANIZATION_ID`, `BILL_AUTH_TYPE=sync_token`, `BILL_USERNAME` and `BILL_PASSWORD`.
+   Railway sets `PORT`.
+4. In **Networking**, generate a public domain. The MCP endpoint is
+   `https://<your-domain>/mcp`.
+
+`railway.json` builds with the `Dockerfile`, runs a single replica (the Bill.com session is
+kept in memory) and uses `/health` as the health check.
+
+### Connecting a client
+
+Claude Code:
+
+```bash
+claude mcp add --transport http bill https://<your-domain>/mcp \
+  --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
+```
+
+Any MCP client that supports Streamable HTTP with custom headers can connect the same way.
 
 ## Available Tools
 

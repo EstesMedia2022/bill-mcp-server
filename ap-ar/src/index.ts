@@ -13,17 +13,18 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { BillClient } from "./bill-client.js";
-import { tools } from "./tools/index.js";
+import { AuthType, BillClient, BillConfig } from "./bill-client.js";
+import { createMcpHttpServer } from "./http-server.js";
+import { selectTools, Tool, tools } from "./tools/index.js";
 
-import { AuthType, BillConfig } from "./bill-client.js";
+type Transport = "stdio" | "http";
 
 /**
  * Get Bill.com API configuration from environment variables
  *
  * Environment variables:
  * - BILL_DEV_KEY: Developer key from Bill.com (required)
- * - BILL_ENVIRONMENT: "sandbox" or "production" (default: production)
+ * - BILL_ENVIRONMENT: "sandbox" or "production" (default: production; required for http transport)
  * - BILL_AUTH_TYPE: "sync_token", "full_access", or "session_token" (default: sync_token)
  *
  * For sync_token and full_access auth:
@@ -39,13 +40,19 @@ import { AuthType, BillConfig } from "./bill-client.js";
  * - full_access: Full access (all operations), 35-minute session
  * - session_token: Uses externally-provided token, no login performed
  */
-function getBillConfig(): BillConfig {
+function getBillConfig(transport: Transport): BillConfig {
   const devKey = process.env.BILL_DEV_KEY;
-  const environment = process.env.BILL_ENVIRONMENT || "production";
+  const environment = process.env.BILL_ENVIRONMENT || (transport === "stdio" ? "production" : undefined);
   const authType = process.env.BILL_AUTH_TYPE || "sync_token";
 
   if (!devKey) {
     throw new Error("BILL_DEV_KEY environment variable is required.");
+  }
+
+  if (environment !== "sandbox" && environment !== "production") {
+    throw new Error(
+      `Invalid BILL_ENVIRONMENT: "${environment ?? ""}". Must be "sandbox" or "production".`
+    );
   }
 
   if (authType !== "sync_token" && authType !== "full_access" && authType !== "session_token") {
@@ -92,20 +99,39 @@ function getBillConfig(): BillConfig {
 }
 
 /**
- * Main server initialization
+ * Transport: MCP_TRANSPORT ("stdio" or "http"), defaulting to http when the
+ * platform provides a PORT (as Railway does) and stdio otherwise
  */
-async function main() {
-  console.error("[Bill.com MCP Server] Starting...");
+function getTransport(): Transport {
+  const transport = process.env.MCP_TRANSPORT || (process.env.PORT ? "http" : "stdio");
+  if (transport !== "stdio" && transport !== "http") {
+    throw new Error(`Invalid MCP_TRANSPORT: "${transport}". Must be "stdio" or "http".`);
+  }
+  return transport;
+}
 
-  // Get configuration
-  const config = getBillConfig();
-  console.error(`[Bill.com MCP Server] Environment: ${config.environment}`);
-  console.error(`[Bill.com MCP Server] Auth type: ${config.authType}`);
+/**
+ * Tools to expose, from environment variables:
+ * - BILL_READ_ONLY: "true" exposes only list_* and get_* tools
+ *   (default: true for http transport, false for stdio)
+ * - BILL_ALLOWED_TOOLS: optional comma-separated list of tool names to expose
+ */
+function getEnabledTools(transport: Transport): Tool[] {
+  const readOnlySetting = process.env.BILL_READ_ONLY ?? (transport === "http" ? "true" : "false");
+  if (readOnlySetting !== "true" && readOnlySetting !== "false") {
+    throw new Error(`Invalid BILL_READ_ONLY: "${readOnlySetting}". Must be "true" or "false".`);
+  }
+  const allowList = (process.env.BILL_ALLOWED_TOOLS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return selectTools(tools, { readOnly: readOnlySetting === "true", allowList });
+}
 
-  // Initialize Bill.com API client
-  const billClient = new BillClient(config);
-
-  // Create MCP server
+/**
+ * Build an MCP server exposing the given tools
+ */
+function createMcpServer(billClient: BillClient, enabledTools: Tool[]): Server {
   const server = new Server(
     {
       name: "bill-mcp-server",
@@ -122,7 +148,7 @@ async function main() {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     console.error("[Bill.com MCP Server] Listing available tools");
     return {
-      tools: tools.map((tool) => ({
+      tools: enabledTools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema,
@@ -135,7 +161,7 @@ async function main() {
     const { name, arguments: args } = request.params;
     console.error(`[Bill.com MCP Server] Tool called: ${name}`);
 
-    const tool = tools.find((t) => t.name === name);
+    const tool = enabledTools.find((t) => t.name === name);
     if (!tool) {
       throw new Error(`Unknown tool: ${name}`);
     }
@@ -167,10 +193,43 @@ async function main() {
     }
   });
 
-  // Start server with stdio transport
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("[Bill.com MCP Server] Server started successfully");
+  return server;
+}
+
+/**
+ * Main server initialization
+ */
+async function main() {
+  console.error("[Bill.com MCP Server] Starting...");
+
+  // Get configuration
+  const transport = getTransport();
+  const config = getBillConfig(transport);
+  const enabledTools = getEnabledTools(transport);
+  console.error(`[Bill.com MCP Server] Environment: ${config.environment}`);
+  console.error(`[Bill.com MCP Server] Auth type: ${config.authType}`);
+  console.error(`[Bill.com MCP Server] Transport: ${transport}`);
+  console.error(`[Bill.com MCP Server] Tools enabled: ${enabledTools.length} of ${tools.length}`);
+
+  // Initialize Bill.com API client, shared by all requests so the session is reused
+  const billClient = new BillClient(config);
+
+  if (transport === "stdio") {
+    const server = createMcpServer(billClient, enabledTools);
+    await server.connect(new StdioServerTransport());
+    console.error("[Bill.com MCP Server] Server started successfully");
+    return;
+  }
+
+  const authToken = process.env.MCP_AUTH_TOKEN;
+  if (!authToken) {
+    throw new Error("MCP_AUTH_TOKEN environment variable is required for http transport.");
+  }
+  const port = Number(process.env.PORT || 3000);
+  const httpServer = createMcpHttpServer(() => createMcpServer(billClient, enabledTools), authToken);
+  httpServer.listen(port, () => {
+    console.error(`[Bill.com MCP Server] Listening on port ${port} (POST /mcp, GET /health)`);
+  });
 }
 
 // Run the server

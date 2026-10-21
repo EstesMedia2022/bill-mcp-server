@@ -265,3 +265,31 @@ export const tools: Tool[] = [
   // Organization
   getOrganizationInfo,
 ];
+
+/**
+ * Read-only tools only fetch data; every other tool can change Bill.com state.
+ */
+export function isReadOnlyTool(tool: Tool): boolean {
+  return /^(list|get)_/.test(tool.name);
+}
+
+/**
+ * Select the tools to expose.
+ *
+ * @param readOnly - expose only read-only tools
+ * @param allowList - if non-empty, expose only tools with these names
+ */
+export function selectTools(
+  allTools: Tool[],
+  { readOnly, allowList }: { readOnly: boolean; allowList: string[] }
+): Tool[] {
+  const unknown = allowList.filter((name) => !allTools.some((t) => t.name === name));
+  if (unknown.length > 0) {
+    throw new Error(`Unknown tool(s) in BILL_ALLOWED_TOOLS: ${unknown.join(", ")}`);
+  }
+  return allTools.filter(
+    (tool) =>
+      (!readOnly || isReadOnlyTool(tool)) &&
+      (allowList.length === 0 || allowList.includes(tool.name))
+  );
+}
