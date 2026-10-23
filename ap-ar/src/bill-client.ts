@@ -5,7 +5,7 @@
  * and error handling.
  */
 
-import axios, { AxiosInstance, AxiosError } from "axios";
+import axios, { AxiosInstance, AxiosError, AxiosResponse } from "axios";
 
 /**
  * Authentication type for Bill.com API
@@ -132,8 +132,6 @@ export class BillClient {
         devKey: this.devKey,
       });
 
-      console.error("[Bill.com API] Login response:", JSON.stringify(response.data, null, 2));
-
       this.sessionId = response.data.sessionId;
       if (!this.sessionId) {
         throw new Error("No sessionId in login response");
@@ -224,48 +222,100 @@ export class BillClient {
   }
 
   /**
+   * Reject endpoints that could escape the intended API path.
+   *
+   * Tool handlers interpolate IDs supplied by the model straight into the
+   * path (e.g. `/bills/${id}`), so an ID such as `../users` would otherwise
+   * reach a different endpoint. Bill.com IDs are plain alphanumeric strings.
+   */
+  private assertSafeEndpoint(endpoint: string): void {
+    const segments = endpoint.split("/").slice(1);
+    const valid =
+      endpoint.startsWith("/") &&
+      segments.length > 0 &&
+      segments.every(
+        (segment) =>
+          /^[A-Za-z0-9_~.-]+$/.test(segment) && segment !== "." && segment !== ".."
+      );
+    if (!valid) {
+      throw new BillApiError(
+        `Invalid Bill.com API endpoint or ID: ${JSON.stringify(endpoint)}`,
+        0,
+        "client_error"
+      );
+    }
+  }
+
+  /**
+   * Send a request, logging in again once if Bill.com rejects the session.
+   *
+   * Sessions can be invalidated before the expiry we track (logout, password
+   * change, idle timeout on Bill.com's side), so a 401 triggers a fresh login.
+   */
+  private async request<T>(
+    endpoint: string,
+    send: (headers: Record<string, string>) => Promise<AxiosResponse<T>>
+  ): Promise<T> {
+    this.assertSafeEndpoint(endpoint);
+    try {
+      const response = await send(await this.getHeaders());
+      return response.data;
+    } catch (error) {
+      const sessionRejected = error instanceof BillApiError && error.status === 401;
+      if (!sessionRejected || this.authType === "session_token") {
+        throw error;
+      }
+      console.error("[Bill.com API] Session rejected (401), logging in again...");
+      this.sessionId = null;
+      this.sessionExpiresAt = 0;
+      const response = await send(await this.getHeaders());
+      return response.data;
+    }
+  }
+
+  /**
    * Make a GET request to the Bill.com API
    */
   async get<T = any>(endpoint: string, params?: Record<string, any>): Promise<T> {
-    const headers = await this.getHeaders();
-    console.error(`[Bill.com API] GET ${endpoint}`, { headers, params });
-    const response = await this.client.get<T>(endpoint, { params, headers });
-    return response.data;
+    console.error(`[Bill.com API] GET ${endpoint}`);
+    return this.request(endpoint, (headers) =>
+      this.client.get<T>(endpoint, { params, headers })
+    );
   }
 
   /**
    * Make a POST request to the Bill.com API
    */
   async post<T = any>(endpoint: string, data?: Record<string, any>): Promise<T> {
-    const headers = await this.getHeaders();
-    const response = await this.client.post<T>(endpoint, data, { headers });
-    return response.data;
+    return this.request(endpoint, (headers) =>
+      this.client.post<T>(endpoint, data, { headers })
+    );
   }
 
   /**
    * Make a PUT request to the Bill.com API
    */
   async put<T = any>(endpoint: string, data?: Record<string, any>): Promise<T> {
-    const headers = await this.getHeaders();
-    const response = await this.client.put<T>(endpoint, data, { headers });
-    return response.data;
+    return this.request(endpoint, (headers) =>
+      this.client.put<T>(endpoint, data, { headers })
+    );
   }
 
   /**
    * Make a PATCH request to the Bill.com API
    */
   async patch<T = any>(endpoint: string, data?: Record<string, any>): Promise<T> {
-    const headers = await this.getHeaders();
-    const response = await this.client.patch<T>(endpoint, data, { headers });
-    return response.data;
+    return this.request(endpoint, (headers) =>
+      this.client.patch<T>(endpoint, data, { headers })
+    );
   }
 
   /**
    * Make a DELETE request to the Bill.com API
    */
   async delete<T = any>(endpoint: string): Promise<T> {
-    const headers = await this.getHeaders();
-    const response = await this.client.delete<T>(endpoint, { headers });
-    return response.data;
+    return this.request(endpoint, (headers) =>
+      this.client.delete<T>(endpoint, { headers })
+    );
   }
 }

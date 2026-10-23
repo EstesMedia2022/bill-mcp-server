@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { BillClient, BillConfig } from "./bill-client.js";
+import { BillApiError, BillClient, BillConfig } from "./bill-client.js";
 import axios from "axios";
 
 // Mock axios
@@ -403,6 +403,93 @@ describe("BillClient", () => {
       const result = await testClient.delete("/vendors/123");
 
       expect(result).toEqual(mockDeleteResponse.data);
+    });
+  });
+
+  describe("endpoint validation", () => {
+    const sessionConfig: BillConfig = {
+      devKey: "test-dev-key",
+      sessionToken: "external-session",
+      environment: "sandbox",
+      authType: "session_token",
+    };
+
+    it.each(["/bills/../users", "/bills/./x", "/bills/a?b=c", "/bills/a#b", "/bills/a%2F..", "/bills/", "bills"])(
+      "should reject unsafe endpoint %s without calling the API",
+      async (endpoint) => {
+        const client = new BillClient(sessionConfig);
+        await expect(client.get(endpoint)).rejects.toThrow("Invalid Bill.com API endpoint");
+        expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+      }
+    );
+
+    it("should allow ordinary nested endpoints", async () => {
+      mockAxiosInstance.post.mockResolvedValue({ data: { ok: true } });
+      const client = new BillClient(sessionConfig);
+      await client.post("/customers/0cu01ABC/bank-accounts/bnk-1.2/archive");
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("session rejected by Bill.com", () => {
+    const syncConfig: BillConfig = {
+      devKey: "test-dev-key",
+      username: "sync-token-name",
+      password: "sync-token-value",
+      organizationId: "008xxxxx",
+      environment: "sandbox",
+      authType: "sync_token",
+    };
+
+    it("should log in again and retry once after a 401", async () => {
+      mockAxiosInstance.post
+        .mockResolvedValueOnce({ data: { sessionId: "old-session" } })
+        .mockResolvedValueOnce({ data: { sessionId: "new-session" } });
+      mockAxiosInstance.get
+        .mockRejectedValueOnce(new BillApiError("expired", 401, "api_error"))
+        .mockResolvedValueOnce({ data: { vendors: [] } });
+
+      const client = new BillClient(syncConfig);
+      const result = await client.get("/vendors");
+
+      expect(result).toEqual({ vendors: [] });
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.get).toHaveBeenLastCalledWith("/vendors", {
+        params: undefined,
+        headers: { sessionId: "new-session", devKey: "test-dev-key" },
+      });
+    });
+
+    it("should not retry more than once", async () => {
+      mockAxiosInstance.post.mockResolvedValue({ data: { sessionId: "session" } });
+      mockAxiosInstance.get.mockRejectedValue(new BillApiError("denied", 401, "api_error"));
+
+      const client = new BillClient(syncConfig);
+      await expect(client.get("/vendors")).rejects.toThrow("denied");
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
+    });
+
+    it("should not retry other errors", async () => {
+      mockAxiosInstance.post.mockResolvedValue({ data: { sessionId: "session" } });
+      mockAxiosInstance.get.mockRejectedValue(new BillApiError("bad", 400, "api_error"));
+
+      const client = new BillClient(syncConfig);
+      await expect(client.get("/vendors")).rejects.toThrow("bad");
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not retry with an external session token", async () => {
+      mockAxiosInstance.get.mockRejectedValue(new BillApiError("expired", 401, "api_error"));
+
+      const client = new BillClient({
+        devKey: "test-dev-key",
+        sessionToken: "external-session",
+        environment: "sandbox",
+        authType: "session_token",
+      });
+      await expect(client.get("/vendors")).rejects.toThrow("expired");
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
     });
   });
 });

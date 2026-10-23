@@ -77,8 +77,16 @@ Create a `.env` file with your Bill.com AP/AR API credentials:
 # Required: Developer Key from Settings → Sync & Integrations → Manage Developer Keys
 BILL_DEV_KEY=your_developer_key_here
 
-# Optional: Environment (default: production)
+# Environment: "sandbox" or "production"
+# (default: production for stdio; required for http transport)
 BILL_ENVIRONMENT=production
+
+# Optional: expose only read-only tools (list_* and get_*)
+# (default: true for http transport, false for stdio)
+BILL_READ_ONLY=true
+
+# Optional: comma-separated list of tool names to expose
+# BILL_ALLOWED_TOOLS=list_bills,get_bill,list_vendors
 
 # Optional: Auth type (default: sync_token)
 # - sync_token: Limited access, 48-hour sessions (for syncing/reporting)
@@ -165,18 +173,116 @@ npm start
 
 ### Docker
 
+The image runs the HTTP transport (see [Remote Deployment](#remote-deployment-http)).
+
 ```bash
 # Build the Docker image
 docker build -t bill-mcp-server .
 
 # Run the container
-docker run \
+docker run -p 3000:3000 \
+  -e PORT=3000 \
+  -e MCP_AUTH_TOKEN=your_random_token_of_at_least_32_chars \
   -e BILL_DEV_KEY=your_dev_key \
   -e BILL_USERNAME=your_sync_token_name \
   -e BILL_PASSWORD=your_sync_token_value \
   -e BILL_ORGANIZATION_ID=008xxxxxxxxxxxxx \
-  -e BILL_ENVIRONMENT=production \
+  -e BILL_ENVIRONMENT=sandbox \
   bill-mcp-server
+```
+
+## Remote Deployment (HTTP)
+
+By default the server speaks MCP over stdio, for clients that launch it locally. Set
+`MCP_TRANSPORT=http` (or just `PORT`, which hosting platforms set for you) to serve the
+[Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+transport instead:
+
+| Endpoint | Auth | Purpose |
+|----------|------|---------|
+| `POST /mcp` | Bearer token (OAuth access token or `MCP_AUTH_TOKEN`) | MCP requests (stateless) |
+| `/authorize`, `/token`, `/register`, `/.well-known/*` | None | OAuth endpoints (Google sign-in only) |
+| `GET /health` | None | Health check, returns `{"status":"ok"}` |
+
+In HTTP mode:
+
+- `BILL_ENVIRONMENT` must be set explicitly, so a deployment never defaults to production.
+- `BILL_READ_ONLY` defaults to `true`. Set it to `false` only if the AI should be able to
+  create or change data in Bill.com, and combine it with `BILL_ALLOWED_TOOLS` to expose only
+  the write tools you need.
+- Every `/mcp` request must be authenticated, with Google sign-in or a static token.
+
+### Authentication: Google sign-in (recommended)
+
+Each user signs in with their own Google account, and only the emails in
+`BILL_ALLOWED_EMAILS` get access. This is what Claude.ai connectors expect: the server acts
+as an OAuth 2.1 authorization server (with dynamic client registration and PKCE) and
+delegates the sign-in itself to Google.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create or pick a project.
+2. **APIs & Services → OAuth consent screen**: configure it. For a Google Workspace
+   organization, choose **Internal** so only accounts from your domain can sign in.
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
+   - Application type: **Web application**
+   - Authorized redirect URI: `https://<your-domain>/oauth/google/callback`
+4. Set these variables:
+
+| Variable | Value |
+|----------|-------|
+| `GOOGLE_CLIENT_ID` | Client ID from step 3 |
+| `GOOGLE_CLIENT_SECRET` | Client secret from step 3 |
+| `BILL_ALLOWED_EMAILS` | Comma-separated emails, e.g. `alice@example.com,bob@example.com` |
+| `OAUTH_SIGNING_SECRET` | Random secret, at least 32 characters (`openssl rand -hex 32`) |
+| `PUBLIC_URL` | `https://<your-domain>` (optional on Railway: defaults to `https://$RAILWAY_PUBLIC_DOMAIN`) |
+
+Tokens are signed by the server and need no database, so they survive restarts. Access
+tokens last 1 hour and refresh tokens 30 days, and every request is checked against the
+current `BILL_ALLOWED_EMAILS`: removing an email revokes that user at once. Changing
+`OAUTH_SIGNING_SECRET` signs everyone out.
+
+`MCP_AUTH_TOKEN` stays optional in this mode. If set, it is accepted **without** sign-in and
+bypasses the email list, so remove it unless a client needs it.
+
+### Authentication: static token
+
+Without `GOOGLE_CLIENT_ID`, every request must send `Authorization: Bearer $MCP_AUTH_TOKEN`.
+The token must be at least 32 characters. Generate one with
+`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+
+### Railway
+
+The repository root holds a `railway.json` and a `Dockerfile` that build this server, so no
+build settings are needed:
+
+1. Create a service from this GitHub repository and pick the branch to deploy. Railway
+   redeploys on every push to that branch.
+2. In the service **Settings**, leave **Root Directory** empty (the repository root).
+3. In **Variables**, set `BILL_ENVIRONMENT`, `BILL_DEV_KEY`, `BILL_ORGANIZATION_ID`,
+   `BILL_AUTH_TYPE=sync_token`, `BILL_USERNAME` and `BILL_PASSWORD`, plus the variables for
+   [Google sign-in](#authentication-google-sign-in-recommended) or `MCP_AUTH_TOKEN`.
+   Railway sets `PORT` and `RAILWAY_PUBLIC_DOMAIN`.
+4. In **Networking**, generate a public domain. The MCP endpoint is
+   `https://<your-domain>/mcp`.
+
+`railway.json` builds with the root `Dockerfile`, runs a single replica (the Bill.com session
+is kept in memory) and uses `/health` as the health check.
+
+### Connecting a client
+
+With Google sign-in, add `https://<your-domain>/mcp` as a custom connector in Claude.ai
+(no token needed). Each user is sent to Google to sign in when they connect. Claude Code
+works the same way:
+
+```bash
+claude mcp add --transport http bill https://<your-domain>/mcp
+# then run /mcp in Claude Code to sign in
+```
+
+With a static token:
+
+```bash
+claude mcp add --transport http bill https://<your-domain>/mcp \
+  --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
 ```
 
 ## Available Tools

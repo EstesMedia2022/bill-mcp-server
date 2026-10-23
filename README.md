@@ -41,6 +41,11 @@ MCP server for Bill.com's Spend & Expense API.
 
 [Read more](./spend-expense/README.md)
 
+## Deployment
+
+The repository root contains a `Dockerfile` and `railway.json` that deploy the AP/AR server
+over HTTP (e.g. on Railway). See [Remote Deployment](./ap-ar/README.md#remote-deployment-http).
+
 ## Development
 
 Each server is an independent Node.js project. Navigate to the respective directory and follow the instructions in its README.
