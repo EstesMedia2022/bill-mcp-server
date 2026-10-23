@@ -50,6 +50,54 @@ function staticTokenVerifier(expectedToken: string): OAuthTokenVerifier {
   };
 }
 
+const OAUTH_PATHS = ["/register", "/authorize", "/token", "/revoke"];
+
+/**
+ * Log failed OAuth requests (error codes only, never credentials), since the
+ * MCP client usually shows just a generic "didn't finish connecting" message
+ */
+function logOAuthFailures(req: Request, res: Response, next: NextFunction) {
+  const endpoint = req.originalUrl.split("?")[0];
+  const json = res.json.bind(res);
+  res.json = (body: { error?: string; error_description?: string }) => {
+    if (res.statusCode >= 400) {
+      console.error(
+        `[Bill.com MCP Server] OAuth ${endpoint} failed (${res.statusCode}): ${body?.error ?? ""} ${body?.error_description ?? ""}`
+      );
+    }
+    return json(body);
+  };
+  res.on("finish", () => {
+    const location = res.getHeader("location");
+    if (typeof location === "string" && location.includes("error=")) {
+      const error = new URL(location, "http://localhost").searchParams;
+      console.error(
+        `[Bill.com MCP Server] OAuth ${endpoint} redirected with error: ${error.get("error")} ${error.get("error_description") ?? ""}`
+      );
+    } else if (endpoint === "/token" && res.statusCode === 200) {
+      console.error(`[Bill.com MCP Server] OAuth tokens issued (${req.body?.grant_type})`);
+    }
+  });
+  next();
+}
+
+/**
+ * Accept client_secret_basic (credentials in the Authorization header), which
+ * the SDK's token endpoint does not read, by moving them into the form body
+ */
+function acceptBasicClientAuth(req: Request, _res: Response, next: NextFunction) {
+  const match = /^Basic (.+)$/i.exec(req.headers.authorization ?? "");
+  if (match && req.body && !req.body.client_id) {
+    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator > 0) {
+      req.body.client_id = decodeURIComponent(decoded.slice(0, separator));
+      req.body.client_secret = decodeURIComponent(decoded.slice(separator + 1));
+    }
+  }
+  next();
+}
+
 function jsonRpcError(res: Response, status: number, message: string) {
   res.status(status).json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
 }
@@ -77,6 +125,8 @@ export function createMcpHttpApp(createMcpServer: () => Server, auth: HttpAuth):
   let resourceMetadataUrl: string | undefined;
   if (auth.kind === "oauth") {
     const mcpUrl = new URL("/mcp", auth.publicUrl);
+    app.use(OAUTH_PATHS, logOAuthFailures);
+    app.use(["/token", "/revoke"], express.urlencoded({ extended: false }), acceptBasicClientAuth);
     app.use(
       mcpAuthRouter({
         provider: auth.provider,

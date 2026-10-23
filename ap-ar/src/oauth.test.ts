@@ -253,6 +253,28 @@ describe("Google OAuth flow", () => {
     expect((await token({ ...params, client_secret: client.client_secret! })).status).toBe(200);
   });
 
+  it("should accept client_secret_basic at the token endpoint", async () => {
+    const client = await register({ token_endpoint_auth_method: "client_secret_basic" });
+    const verifier = randomBytes(32).toString("base64url");
+    const back = await signIn(client.client_id, "joshua@estesmedia.com", verifier);
+    const basic = (secret: string) =>
+      fetch(`${baseUrl}/token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${Buffer.from(`${encodeURIComponent(client.client_id)}:${encodeURIComponent(secret)}`).toString("base64")}`,
+        },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: back.searchParams.get("code")!,
+          code_verifier: verifier,
+          redirect_uri: CLIENT_REDIRECT,
+        }),
+      });
+    expect((await basic("wrong")).status).toBe(400);
+    expect((await basic(client.client_secret!)).status).toBe(200);
+  });
+
   it("should reject an unregistered redirect URI", async () => {
     const { client_id } = await register();
     const res = await fetch(
