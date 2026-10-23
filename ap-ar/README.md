@@ -214,20 +214,20 @@ In HTTP mode:
 
 ### Railway
 
+The repository root holds a `railway.json` and a `Dockerfile` that build this server, so no
+build settings are needed:
+
 1. Create a service from this GitHub repository and pick the branch to deploy. Railway
    redeploys on every push to that branch.
-2. In the service **Settings**:
-   - **Root Directory**: `/ap-ar`
-   - **Config-as-code / Railway Config File**: `/ap-ar/railway.json` (the config file path
-     does not follow the root directory)
+2. In the service **Settings**, leave **Root Directory** empty (the repository root).
 3. In **Variables**, set `MCP_AUTH_TOKEN`, `BILL_ENVIRONMENT`, `BILL_DEV_KEY`,
    `BILL_ORGANIZATION_ID`, `BILL_AUTH_TYPE=sync_token`, `BILL_USERNAME` and `BILL_PASSWORD`.
    Railway sets `PORT`.
 4. In **Networking**, generate a public domain. The MCP endpoint is
    `https://<your-domain>/mcp`.
 
-`railway.json` builds with the `Dockerfile`, runs a single replica (the Bill.com session is
-kept in memory) and uses `/health` as the health check.
+`railway.json` builds with the root `Dockerfile`, runs a single replica (the Bill.com session
+is kept in memory) and uses `/health` as the health check.
 
 ### Connecting a client
 
