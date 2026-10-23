@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { AddressInfo } from "node:net";
-import { Server as HttpServer } from "node:http";
+import { createServer, Server as HttpServer } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { createMcpHttpServer, isAuthorized } from "./http-server.js";
+import { createMcpHttpApp, isAuthorized } from "./http-server.js";
 
 const TOKEN = "a".repeat(40);
 
@@ -25,12 +25,12 @@ describe("isAuthorized", () => {
   });
 });
 
-describe("createMcpHttpServer", () => {
+describe("createMcpHttpApp with a static token", () => {
   let httpServer: HttpServer;
   let baseUrl: string;
 
   beforeAll(async () => {
-    httpServer = createMcpHttpServer(createTestMcpServer, TOKEN);
+    httpServer = createServer(createMcpHttpApp(createTestMcpServer, { kind: "static", token: TOKEN }));
     await new Promise<void>((resolve) => httpServer.listen(0, resolve));
     baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   });
@@ -51,7 +51,7 @@ describe("createMcpHttpServer", () => {
     });
 
   it("should refuse a short auth token", () => {
-    expect(() => createMcpHttpServer(createTestMcpServer, "short")).toThrow("at least 32");
+    expect(() => createMcpHttpApp(createTestMcpServer, { kind: "static", token: "short" })).toThrow("at least 32");
   });
 
   it("should serve /health without auth", async () => {

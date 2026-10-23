@@ -14,7 +14,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { AuthType, BillClient, BillConfig } from "./bill-client.js";
-import { createMcpHttpServer } from "./http-server.js";
+import { createMcpHttpApp, HttpAuth } from "./http-server.js";
+import { GoogleOAuthProvider } from "./oauth.js";
 import { selectTools, Tool, tools } from "./tools/index.js";
 
 type Transport = "stdio" | "http";
@@ -129,6 +130,64 @@ function getEnabledTools(transport: Transport): Tool[] {
 }
 
 /**
+ * Authentication for the http transport, from environment variables.
+ *
+ * With GOOGLE_CLIENT_ID set, users sign in with Google (OAuth) and only emails
+ * in BILL_ALLOWED_EMAILS get access. Requires:
+ * - GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET: Google OAuth client credentials
+ * - BILL_ALLOWED_EMAILS: comma-separated list of allowed emails
+ * - OAUTH_SIGNING_SECRET: random secret of at least 32 characters
+ * - PUBLIC_URL: public base URL (defaults to https://$RAILWAY_PUBLIC_DOMAIN)
+ * MCP_AUTH_TOKEN is then optional and, if set, is accepted without sign-in.
+ *
+ * Otherwise every request needs MCP_AUTH_TOKEN as a bearer token.
+ */
+function getHttpAuth(): HttpAuth {
+  const staticToken = process.env.MCP_AUTH_TOKEN || undefined;
+  const googleClientId = process.env.GOOGLE_CLIENT_ID;
+
+  if (!googleClientId) {
+    if (!staticToken) {
+      throw new Error(
+        "Set GOOGLE_CLIENT_ID (Google sign-in) or MCP_AUTH_TOKEN (static token) for http transport."
+      );
+    }
+    console.error("[Bill.com MCP Server] Auth: static token");
+    return { kind: "static", token: staticToken };
+  }
+
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const signingSecret = process.env.OAUTH_SIGNING_SECRET;
+  const allowedEmails = (process.env.BILL_ALLOWED_EMAILS ?? "")
+    .split(",")
+    .map((email) => email.trim())
+    .filter(Boolean);
+  const publicUrl =
+    process.env.PUBLIC_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : undefined);
+
+  if (!googleClientSecret || !signingSecret || !publicUrl) {
+    throw new Error(
+      "Google sign-in requires GOOGLE_CLIENT_SECRET, OAUTH_SIGNING_SECRET and PUBLIC_URL (or RAILWAY_PUBLIC_DOMAIN)."
+    );
+  }
+
+  const provider = new GoogleOAuthProvider({
+    publicUrl: new URL(publicUrl),
+    googleClientId,
+    googleClientSecret,
+    allowedEmails,
+    signingSecret,
+    staticToken,
+  });
+  console.error(`[Bill.com MCP Server] Auth: Google sign-in, ${allowedEmails.length} allowed email(s)`);
+  if (staticToken) {
+    console.error("[Bill.com MCP Server] MCP_AUTH_TOKEN is also accepted and bypasses the email allow list");
+  }
+  return { kind: "oauth", provider, publicUrl: new URL(publicUrl) };
+}
+
+/**
  * Build an MCP server exposing the given tools
  */
 function createMcpServer(billClient: BillClient, enabledTools: Tool[]): Server {
@@ -221,13 +280,9 @@ async function main() {
     return;
   }
 
-  const authToken = process.env.MCP_AUTH_TOKEN;
-  if (!authToken) {
-    throw new Error("MCP_AUTH_TOKEN environment variable is required for http transport.");
-  }
   const port = Number(process.env.PORT || 3000);
-  const httpServer = createMcpHttpServer(() => createMcpServer(billClient, enabledTools), authToken);
-  httpServer.listen(port, () => {
+  const app = createMcpHttpApp(() => createMcpServer(billClient, enabledTools), getHttpAuth());
+  app.listen(port, () => {
     console.error(`[Bill.com MCP Server] Listening on port ${port} (POST /mcp, GET /health)`);
   });
 }
